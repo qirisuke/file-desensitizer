@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# 测试产物
+_e2e_tmp/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地配置（含内网地址/凭证，切勿提交）
+config.local.json
+*.local.json
+.env
+.env.*
+
+# 词表与样例数据（可能含业务敏感内容，请自行评估后再放行）
+sensitive_lists/
+*.wordlist
+*.敏感词表
