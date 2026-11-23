@@ -17,8 +17,11 @@
 |---|---|
 | 🔄 关键词替换 | 关键词 → 替代词，可配多条，按顺序执行 |
 | 🛡️ 敏感词屏蔽 | 自定义词表（可导入文件）+ 内置国企字段库，固定掩码 |
+| 🏷️ 实体泛化 | 公司名/��名 → `客户A`、`人员B`，**跨文件全局一致** |
+| 🔗 别名替换 | 机构名、项目名 → `某某农商银行`、`某某重点项目`，可编辑 |
 | 📁 文件名处理 | 文件名与文件内容**同时**脱敏，文件名掩码自动适配 Windows 非法字符 |
-| 🏢 国企字段库 | 内置 **7 大类 56 项**敏感字段规则，纯 JSON 可编辑扩充 |
+| 📊 Office 支持 | xlsx（多 sheet）、docx（段落+表格），**零 pip 依赖**，保真读写 |
+| 🏢 国企字段库 | 内置 **8 大类 74 项**敏感字段规则，纯 JSON 可编辑扩充 |
 | 👁️ 预览后执行 | 先扫描列出全部命中项，确认后才真正改写文件 |
 | 📦 免安装 EXE | PyInstaller 单文件，拷贝即用 |
 | 🔒 零联网 | 有自检脚本证明不发起任何对外连接 |
@@ -72,14 +75,26 @@ build.bat
      - 内置国企敏感字段库（可逐项勾选）
      - 自定义敏感词表（每行一个，可导入 `.txt` / `.csv`）
      - 内容掩码（默认 `***`）、文件名掩码（默认 `已脱敏`）、是否区分大小写
-4. **扫描预览** —— 列出所有命中项、每处替换次数、脱敏样例，**不改任何文件**
+   - *实体泛化*：把公司名、人名替换成 `客户A` / `人员B`，同一实体在整个目录树内始终一致
+   - *别名表*：机构名、项目名的固定映射，每行一条 `原文 = 泛化名`
+4. **扫描预览** —— 列出所有命中项、每处替换次数、脱敏样例、实体映射表，**不改任何文件**
 5. **确认执行** —— 真正改写文件并重命名
 
 执行顺序：
 
 ```
-自定义敏感词表 → 内置字段库（标签型）→ 内置字段库（纯值型）→ 关键词替换
+别名替换 → 实体泛化 → 自定义敏感词表 → 内置字段库（标签型）→ 内置字段库（纯值型）→ 关键词替换
 ```
+
+### 支持的文件格式
+
+| 格式 | 处理方式 |
+|---|---|
+| `.txt` `.md` `.csv` | 按行处理；Markdown / CSV 表格做表格感知（表头、行标签都能识别） |
+| `.xlsx` | 逐 sheet 处理，保留 sheet 名与顺序、单元格类型、列宽、样式 |
+| `.docx` | 逐段落与表格处理，保留段落样式、表格结构、页眉页脚 |
+
+Office 读写只用标准库 `zipfile` + `xml.etree` 实现，**不需要 openpyxl / python-docx**。
 
 ### 脱敏前后对照
 
@@ -101,10 +116,19 @@ build.bat
 ```text
 企业名称：***
 统一社会信用代码：***
-法定代表人：***
+法定代表人：人员A
 手机：***
 投标报价：***
 客户名单：***
+```
+
+实体泛化示例（同一实体在所有文件里始终一致）：
+
+```text
+海口椰风农产品有限公司  →  客户A
+临春椰子深加工有限公司  →  客户B
+海南农资供应链有限公司  →  供应商A
+陈国华                →  人员A
 ```
 
 ---
@@ -122,6 +146,7 @@ build.bat
 | 人员薪酬与个人信息 | 8 | 身份证号、护照号、银行卡号、年薪月薪、绩效奖金、员工名单、社保基数 |
 | 密级与内部标识 | 3 | 密级标注、绝密/机密/内部资料等字样、页眉水印编号 |
 | 账号密码与密钥 | 3 | 密码/口令、API Key / Token、私钥与证书密码 |
+| 银行业经营指标与授信 | 18 | 存款余额、涉农贷款余额、不良贷款率、营业收入、净利润、资本充足率、客户总数、授信额度、放款余额、合作额度、社保基数、采购成本、毛利率、出生日期、家庭住址、企业微信号、银行卡号（裸值）、社保账号（裸值） |
 
 字段默认全部勾选，可在界面上逐项取消。扩充规则的方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
@@ -144,12 +169,15 @@ PYTHONIOENCODING=utf-8 python test_offline.py
 ## 测试
 
 ```bash
-PYTHONIOENCODING=utf-8 python test_masker.py    # 引擎：命中统计、残留检查、行数守恒
-PYTHONIOENCODING=utf-8 python test_e2e.py       # 端到端：扫描 -> 落盘 -> 断言
-PYTHONIOENCODING=utf-8 python test_offline.py   # 离线保证
+PYTHONIOENCODING=utf-8 python test_masker.py           # 引擎：命中统计、残留检查、行数守恒
+PYTHONIOENCODING=utf-8 python test_e2e.py              # 端到端：扫描 -> 落盘 -> 断言
+PYTHONIOENCODING=utf-8 python test_offline.py          # 离线保证
+PYTHONIOENCODING=utf-8 python tests/test_office_io.py  # Office 读写保真
+PYTHONIOENCODING=utf-8 python tests/test_entity.py     # 实体泛化：识别、一致性、别名
+PYTHONIOENCODING=utf-8 python tests/test_service_e2e.py # 服务级：HTTP API 全流程
 ```
 
-三个脚本都必须以退出码 0 结束。
+所有脚本都必须以退出码 0 结束。
 
 > Windows 下建议设 `PYTHONIOENCODING=utf-8`，否则中文输出会乱码。
 
@@ -163,7 +191,8 @@ PYTHONIOENCODING=utf-8 python test_offline.py   # 离线保证
 |---|---|---|
 | `GET` | `/` | 前端界面 |
 | `GET` | `/api/field-library` | 返回内置字段库与默认勾选项 |
-| `POST` | `/api/scan` | 扫描预览，返回命中明细与样例 |
+| `GET` | `/api/aliases` | 返回默认别名表 |
+| `POST` | `/api/scan` | 扫描预览，返回命中明细、样例、实体映射表 |
 | `POST` | `/api/apply` | 按预览结果落盘（改写内容 + 重命名） |
 
 `POST /api/scan` 请求体：
@@ -180,7 +209,12 @@ PYTHONIOENCODING=utf-8 python test_offline.py   # 离线保证
   "case_sensitive": true,
   "include_filenames": true,
   "include_contents": true,
-  "recursive": true
+  "recursive": true,
+  "generalize_entities": true,
+  "aliases": {
+    "organizations": { "海南农商银行": "某某农商银行" },
+    "projects": { "澄迈县椰果供应链建设项目": "某某重点项目" }
+  }
 }
 ```
 
@@ -192,6 +226,7 @@ PYTHONIOENCODING=utf-8 python test_offline.py   # 离线保证
 - **只重命名文件，不重命名目录**：目标目录本身不会改名，否则路径失效。目录树中各层级的**文件**名都会被处理。
 - **直接改写原文件**：执行前请确认预览结果，重要文件建议先备份。
 - **正则匹配的边界**：少数文档（标签与值分两行书写）可能不被命中，可用自定义敏感词表补充。
+- **泛化名的编号顺序**：按实体首次出现顺序分配，同一实体跨文件一致。期望编号若与既有台账不符，可用 `EntityMapper.import_map()` 导入映射表对齐。
 - **「密级与内部标识」分类会改章节标题**：它会屏蔽「商业秘密」「仅供内部使用」等字样。不需要时取消勾选该分类。
 
 ---
@@ -202,10 +237,15 @@ PYTHONIOENCODING=utf-8 python test_offline.py   # 离线保证
 文件脱敏工具/
 ├── app.py                      # Flask 服务 + API
 ├── masker.py                   # 脱敏引擎（扫描与落盘共用同一执行路径）
+├── pipeline.py                 # 集成流水线（表格语义 + 各格式调度）
+├── entity.py                   # 实体泛化引擎（公司名/���名/别名）
+├── entity_aliases.json         # 默认别名表
+├── office_io.py                # xlsx / docx 读写（纯标准库）
 ├── sensitive_fields.json       # 内置国企敏感字段库（可编辑扩充）
 ├── templates/
 │   └── index.html              # 前端界面
 ├── examples/                   # 脱敏前后对照样例（由工具自身生成）
+├── tests/                      # 各模块自检脚本
 ├── build.bat                   # 打包脚本（PyInstaller 单文件 EXE）
 ├── start.bat                   # 启动脚本（优先用已打包 EXE）
 ├── requirements.txt

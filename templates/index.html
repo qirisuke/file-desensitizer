@@ -198,7 +198,24 @@
     <div class="card" id="maskCard">
         <div class="card-title">🛡️ 敏感词屏蔽 <span class="hint">先于关键词替换执行</span></div>
         <div class="exec-order">
-            执行顺序：<b>自定义敏感词表</b> → <b>内置国企字段库（标签型）</b> → <b>内置国企字段库（纯值型）</b> → <b>关键词替换</b>
+            执行顺序：<b>别名替换</b> → <b>实体泛化</b> → <b>自定义敏感词表</b> → <b>内置字段库（标签型）</b> → <b>内置字段库（纯值型）</b> → <b>关键词替换</b>
+        </div>
+
+        <div class="form-group">
+            <label>实体泛化 <span class="hint">把公司名、人名换成「客户A / 人员B」，跨文件保持一致</span></label>
+            <div class="checkbox-group">
+                <label class="checkbox-item"><input type="checkbox" id="generalizeEntities" checked><span>启用实体泛化</span></label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>别名表 <span class="hint">机构名、项目名等固定映射，可编辑</span></label>
+            <textarea id="aliasTable" style="min-height:150px;" placeholder="每行一条：原文 = 泛化名&#10;海南农商银行 = 某某农商银行"></textarea>
+            <div style="display:flex;gap:10px;margin-top:8px;align-items:center;">
+                <button class="btn btn-outline btn-small" onclick="loadAliases()">载入默认别名</button>
+                <button class="btn btn-outline btn-small" onclick="document.getElementById('aliasTable').value='';document.getElementById('aliasInfo').textContent='';">清空</button>
+                <span style="font-size:12px;color:#999;" id="aliasInfo"></span>
+            </div>
         </div>
 
         <div class="form-group">
@@ -282,6 +299,11 @@
         <div id="sampleSection" style="margin-bottom:8px;">
             <h4 style="font-size:13px;color:#7c4dff;margin-bottom:8px;">脱敏样例</h4>
             <div id="sampleList"></div>
+        </div>
+
+        <div id="entitySection" style="margin-bottom:8px;">
+            <h4 style="font-size:13px;color:#e6a23c;margin-bottom:8px;">实体泛化映射</h4>
+            <div class="change-list" id="entityList"></div>
         </div>
 
         <div class="btn-group">
@@ -460,7 +482,50 @@ function currentWordList() {
     return document.getElementById('wordList').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 }
 
-// ---------- Scan ----------
+// ---------- 别名表 ----------
+function parseAliases(text) {
+    const orgs = {};
+    const projects = {};
+    const lines = (text || '').split(/\r?\n/);
+    let count = 0;
+    lines.forEach(function(line) {
+        const t = line.trim();
+        if (!t || t.startsWith('#')) return;
+        const m = t.match(/^(.+?)\s*[=＝]\s*(.+)$/);
+        if (!m) return;
+        const src = m[1].trim();
+        const dst = m[2].trim();
+        if (!src || !dst) return;
+        // 含「项目」「工程」等词归入项目别名，其余归入机构别名
+        if (/项目|工程|工程名/.test(src)) projects[src] = dst;
+        else orgs[src] = dst;
+        count++;
+    });
+    return {aliases: {organizations: orgs, projects: projects}, count: count};
+}
+
+function currentAliases() {
+    const parsed = parseAliases(document.getElementById('aliasTable').value);
+    document.getElementById('aliasInfo').textContent =
+        parsed.count ? `已配置 ${parsed.count} 条别名` : '';
+    return parsed.aliases;
+}
+
+function loadAliases() {
+    fetch('/api/aliases')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            const lines = [];
+            const orgs = data.organizations || {};
+            const projs = data.projects || {};
+            Object.keys(orgs).forEach(function(k) { lines.push(k + ' = ' + orgs[k]); });
+            Object.keys(projs).forEach(function(k) { lines.push(k + ' = ' + projs[k]); });
+            document.getElementById('aliasTable').value = lines.join('\n');
+            document.getElementById('aliasInfo').textContent = `已载入 ${lines.length} 条默认别名`;
+        });
+}
+
+// ---------- 扫描 ----------
 async function scanFiles() {
     const directory = document.getElementById('directory').value.trim();
     if (!directory) { alert('请输入目标目录'); return; }
@@ -478,6 +543,8 @@ async function scanFiles() {
         include_filenames: document.getElementById('includeFilenames').checked,
         include_contents: document.getElementById('includeContents').checked,
         recursive: document.getElementById('recursive').checked,
+        generalize_entities: document.getElementById('generalizeEntities').checked,
+        aliases: currentAliases(),
     };
 
     if (mode !== 'mask' && payload.rules.length === 0) { alert('请至少添加一条替换规则，或切换为「仅敏感词屏蔽」'); return; }
@@ -549,9 +616,23 @@ function showResult(data) {
             </div>`).join('');
     }
 
+    showEntityMap(data.entity_map);
     document.getElementById('resultSection').style.display = 'block';
     document.getElementById('successMsg').style.display = 'none';
     document.getElementById('resultSection').scrollIntoView({ behavior: 'smooth' });
+}
+
+function showEntityMap(map) {
+    const section = document.getElementById('entitySection');
+    const list = document.getElementById('entityList');
+    const entries = Object.entries(map || {});
+    if (!entries.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    list.innerHTML = entries.map(function(e) {
+        return `<div class="change-item"><span class="path">${escapeHtml(e[1])}</span>` +
+               `<span class="arrow">→</span><span class="label content">${escapeHtml(e[0])}</span></div>`;
+    }).join('');
 }
 
 function escapeHtml(s) {
@@ -572,6 +653,18 @@ async function applyChanges() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 directory: document.getElementById('directory').value.trim(),
+                mode: document.querySelector('.radio-item.active').dataset.mode,
+                rules: currentRules(),
+                word_list: currentWordList(),
+                field_ids: selectedFieldIds(),
+                mask: document.getElementById('maskStyle').value || '***',
+                filename_mask: document.getElementById('filenameMask').value || '已脱敏',
+                case_sensitive: document.getElementById('caseSensitive').checked,
+                include_filenames: document.getElementById('includeFilenames').checked,
+                include_contents: document.getElementById('includeContents').checked,
+                recursive: document.getElementById('recursive').checked,
+                generalize_entities: document.getElementById('generalizeEntities').checked,
+                aliases: currentAliases(),
                 preview_data: scanResult,
             }),
         });
@@ -602,6 +695,7 @@ function resetResult() {
 addRule();
 setMode('combo');
 loadFieldLibrary();
+loadAliases();
 </script>
 </body>
 </html>

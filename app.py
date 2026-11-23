@@ -8,6 +8,9 @@ from pathlib import Path
 from flask import Flask, request, jsonify, render_template
 
 import masker
+import entity
+import office_io
+import pipeline
 
 if getattr(sys, 'frozen', False):
     RESOURCE_DIR = Path(sys._MEIPASS)
@@ -40,10 +43,13 @@ SAMPLE_CHARS = 900
 
 
 def is_text_file(filepath: Path) -> bool:
-    if filepath.suffix.lower() in BINARY_EXTENSIONS:
+    # 后缀只算一次，避免重复调用 filepath.suffix.lower()
+    suffix = filepath.suffix.lower()
+    if suffix in BINARY_EXTENSIONS:
         return False
-    if filepath.suffix.lower() in TEXT_EXTENSIONS:
+    if suffix in TEXT_EXTENSIONS:
         return True
+    # 不在扩展名白名单里：读前 8192 字节做 utf-8 解码试探
     try:
         with open(filepath, 'rb') as f:
             chunk = f.read(8192)
@@ -91,7 +97,57 @@ def build_config(data: dict) -> dict:
         'include_filenames': data.get('include_filenames', True),
         'include_contents': data.get('include_contents', True),
         'recursive': data.get('recursive', True),
+        'generalize_entities': data.get('generalize_entities', True),
+        'aliases': data.get('aliases') or None,
     }
+
+
+def _collect_files(base: Path, recursive: bool):
+    walker = base.rglob('*') if recursive else base.glob('*')
+    return [f for f in walker
+            if f.is_file() and (is_text_file(f) or office_io.is_office_file(f))]
+
+
+def _process_file(pipe, filepath: Path):
+    """处理单个文件。
+
+    返回 (新文本, 命中明细, 新单元值)。纯文本给新文本，Office 给单元值字典。
+    """
+    suffix = filepath.suffix.lower()
+    if suffix in office_io.XLSX_SUFFIXES:
+        changes, matched = pipe.process_xlsx(filepath)
+        return None, matched, changes
+    if suffix in office_io.DOCX_SUFFIXES:
+        changes, matched = pipe.process_docx(filepath)
+        return None, matched, changes
+    content = filepath.read_text(encoding='utf-8')
+    if suffix == '.csv':
+        new_content, matched = pipe.process_csv(content)
+    else:
+        new_content, matched = pipe.process_plain_text(content)
+    return new_content, matched, None
+
+
+def _new_filename(pipe, filepath: Path):
+    """计算脱敏后的文件名。"""
+    if not pipe.filename_ops:
+        return filepath.name
+    new_name, _ = masker.apply_ops(filepath.name, pipe.filename_ops,
+                                     for_filename=True, collect=False)
+    if pipe.mapper is not None:
+        new_name = pipe.mapper.map_text(new_name, '')
+    return safe_filename(new_name)
+
+
+def _office_sample(cell_changes: dict) -> str:
+    """从 Office 单元值里取一段样例文本。"""
+    parts = []
+    for value in cell_changes.values():
+        if value:
+            parts.append(str(value))
+        if len(' | '.join(parts)) > SAMPLE_CHARS:
+            break
+    return ' | '.join(parts)[:SAMPLE_CHARS]
 
 
 def scan_directory(config: dict) -> dict:
@@ -105,74 +161,119 @@ def scan_directory(config: dict) -> dict:
     if not ops:
         return {'error': '请至少配置一条替换规则，或在「敏感词屏蔽」中启用字段'}
 
-    filename_ops = masker.ops_for_filename(ops)
+    mapper = entity.EntityMapper() if config.get('generalize_entities', True) else None
+    pipe = pipeline.Pipeline(config, FIELD_LIBRARY, mapper)
 
-    walker = base.rglob('*') if config['recursive'] else base.glob('*')
-    text_files = [f for f in walker if f.is_file() and is_text_file(f)]
+    files = _collect_files(base, config['recursive'])
 
     filename_changes = []
     content_changes = []
     samples = []
 
-    for filepath in text_files:
-        rel_path = filepath.relative_to(base)
+    include_filenames = config['include_filenames']
+    include_contents = config['include_contents']
 
-        if config['include_filenames'] and filename_ops:
-            new_name, _ = masker.apply_ops(filepath.name, filename_ops, for_filename=True)
-            new_name = safe_filename(new_name)
+    for filepath in files:
+        rel_path = filepath.relative_to(base)
+        rel_str = str(rel_path)
+
+        if include_filenames:
+            new_name = _new_filename(pipe, filepath)
             if new_name != filepath.name:
                 filename_changes.append({
-                    'old': str(rel_path),
+                    'old': rel_str,
                     'new': str(rel_path.parent / new_name),
-                    'ops': [op for op in filename_ops],
                 })
 
-        if config['include_contents']:
+        if not include_contents:
+            continue
+        try:
+            new_content, matched, cell_changes = _process_file(pipe, filepath)
+        except (UnicodeDecodeError, PermissionError, OSError):
+            continue
+
+        if cell_changes is not None:
+            content_changes.append({
+                'file': rel_str,
+                'ops': matched,
+                'kind': 'office',
+            })
+            if len(samples) < SAMPLE_LIMIT:
+                samples.append({
+                    'file': rel_str,
+                    'sample': _office_sample(cell_changes),
+                })
+        elif new_content is not None:
             try:
-                content = filepath.read_text(encoding='utf-8')
+                original = filepath.read_text(encoding='utf-8')
             except (UnicodeDecodeError, PermissionError, OSError):
                 continue
-            new_content, results = masker.apply_ops(content, ops)
-            if new_content != content:
-                matched = [r for r in results if r['count'] > 0]
+            if new_content != original:
                 content_changes.append({
-                    'file': str(rel_path),
+                    'file': rel_str,
                     'ops': matched,
+                    'kind': 'text',
                 })
                 if len(samples) < SAMPLE_LIMIT:
                     samples.append({
-                        'file': str(rel_path),
+                        'file': rel_str,
                         'sample': new_content[:SAMPLE_CHARS],
                     })
 
     return {
-        'scanned_files': len(text_files),
+        'scanned_files': len(files),
         'filename_changes': filename_changes,
         'content_changes': content_changes,
         'samples': samples,
+        'entity_map': mapper.export_map() if mapper else {},
+        # 落盘时按同一份配置重算，保证与预览完全一致（幂等）
+        'config': {k: v for k, v in config.items() if k != 'aliases'},
         'total_filename_changes': len(filename_changes),
         'total_content_changes': sum(
-            sum(r['count'] for r in c['ops'])
+            sum(r.get('count', 0) for r in c['ops'])
             for c in content_changes
         ),
         'matched_files': len(content_changes),
     }
 
 
-def apply_changes(directory: str, preview_data: dict) -> dict:
-    base = Path(directory)
+def apply_changes(config, preview_data: dict) -> dict:
+    # 向后兼容：早期签名为 apply_changes(directory, preview_data)。
+    # 那时 preview 里没有 config，只能按预览记录的 ops 直接落盘。
+    if isinstance(config, str):
+        preview_config = preview_data.get('config')
+        if preview_config:
+            config = build_config(preview_config)
+        else:
+            return _apply_changes_legacy(Path(_clean_directory(config)),
+                                          preview_data)
+
+    base = Path(config['directory'])
     applied_files = 0
     applied_renames = 0
     errors = []
+
+    # 用预览时保存的实体映射表重建，保证泛化名与预览完全一致
+    mapper = entity.EntityMapper() if config.get('generalize_entities', True) else None
+    if mapper is not None and preview_data.get('entity_map'):
+        mapper.import_map(preview_data['entity_map'])
+    pipe = pipeline.Pipeline(config, FIELD_LIBRARY, mapper)
 
     for item in preview_data.get('content_changes', []):
         filepath = base / item['file']
         if not filepath.exists():
             continue
         try:
-            content = filepath.read_text(encoding='utf-8')
-            new_content, _ = masker.apply_ops(content, item.get('ops', []))
-            if new_content != content:
+            new_content, _matched, cell_changes = _process_file(pipe, filepath)
+            if cell_changes is not None:
+                if cell_changes:
+                    _write_office_inplace(filepath, cell_changes)
+                    applied_files += 1
+                continue
+            if new_content is None:
+                continue
+            original = filepath.read_text(encoding='utf-8')
+            if new_content != original:
                 filepath.write_text(new_content, encoding='utf-8')
                 applied_files += 1
         except Exception as e:
@@ -183,7 +284,9 @@ def apply_changes(directory: str, preview_data: dict) -> dict:
         new_path = base / item['new']
         if not old_path.exists():
             continue
-        new_path.parent.mkdir(parents=True, exist_ok=True)
+        parent = new_path.parent
+        if not parent.is_dir():
+            parent.mkdir(parents=True, exist_ok=True)
         try:
             old_path.rename(new_path)
             applied_renames += 1
@@ -195,6 +298,70 @@ def apply_changes(directory: str, preview_data: dict) -> dict:
         'applied_renames': applied_renames,
         'errors': errors,
     }
+
+
+def _apply_changes_legacy(base: Path, preview_data: dict) -> dict:
+    """旧签名路径：按预览里记录的 ops 直接落盘（不重算）。"""
+    applied_files = 0
+    applied_renames = 0
+    errors = []
+
+    for item in preview_data.get('content_changes', []):
+        filepath = base / item['file']
+        try:
+            content = filepath.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            errors.append(f'{item["file"]}: {e}')
+            continue
+        try:
+            new_content, _ = masker.apply_ops(content, item.get('ops', []),
+                                              collect=False)
+            if new_content != content:
+                filepath.write_text(new_content, encoding='utf-8')
+                applied_files += 1
+        except Exception as e:
+            errors.append(f'{item["file"]}: {e}')
+
+    for item in preview_data.get('filename_changes', []):
+        old_path = base / item['old']
+        new_path = base / item['new']
+        if not old_path.exists():
+            continue
+        parent = new_path.parent
+        if not parent.is_dir():
+            parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old_path.rename(new_path)
+            applied_renames += 1
+        except Exception as e:
+            errors.append(f'{item["old"]}: {e}')
+
+    return {
+        'applied_files': applied_files,
+        'applied_renames': applied_renames,
+        'errors': errors,
+    }
+
+
+def _write_office_inplace(filepath: Path, cell_changes: dict):
+    """原地改写 Office 文件：先写临时文件，成功后再替换。"""
+    import os
+    import tempfile
+    tmp_dir = filepath.parent
+    fd, tmp_name = tempfile.mkstemp(dir=str(tmp_dir), suffix=filepath.suffix)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        office_io.write_units(filepath, tmp_path, cell_changes)
+        os.replace(str(tmp_path), str(filepath))
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 @app.route('/')
@@ -210,6 +377,11 @@ def field_library():
     })
 
 
+@app.route('/api/aliases')
+def aliases():
+    return jsonify(entity.load_aliases())
+
+
 @app.route('/api/scan', methods=['POST'])
 def scan():
     config = build_config(request.json or {})
@@ -219,11 +391,11 @@ def scan():
 @app.route('/api/apply', methods=['POST'])
 def apply():
     data = request.json or {}
-    directory = _clean_directory(data.get('directory', ''))
+    config = build_config(data)
     preview_data = data.get('preview_data', {})
     if not preview_data:
         return jsonify({'error': '请先执行预览扫描'})
-    return jsonify(apply_changes(directory, preview_data))
+    return jsonify(apply_changes(config, preview_data))
 
 
 def find_free_port(preferred=5000, attempts=30):

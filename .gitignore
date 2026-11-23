@@ -17,6 +17,16 @@ _e2e_tmp/
 .coverage
 htmlcov/
 
+# 性能基准产物
+.bench_corpus/
+bench_*.json
+_ref/
+
+# 诊断临时文件
+tests/_diag_*
+tests/_dump_*
+tests/*.tmp
+
 # IDE
 .idea/
 .vscode/

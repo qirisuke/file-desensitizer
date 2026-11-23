@@ -58,7 +58,7 @@ def main():
     for c in preview['filename_changes']:
         print(f"  {c['old']}\n    -> {c['new']}")
 
-    result = service.apply_changes(str(ROOT), preview)
+    result = service.apply_changes(config, preview)
     print(f"\n落盘: 修改内容 {result['applied_files']} 个, 重命名 {result['applied_renames']} 个, 错误 {len(result['errors'])}")
     for e in result['errors']:
         print('  错误:', e)
