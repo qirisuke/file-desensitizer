@@ -17,7 +17,7 @@
 |---|---|
 | 🔄 关键词替换 | 关键词 → 替代词，可配多条，按顺序执行 |
 | 🛡️ 敏感词屏蔽 | 自定义词表（可导入文件）+ 内置国企字段库，固定掩码 |
-| 🏷️ 实体泛化 | 公司名/��名 → `客户A`、`人员B`，**跨文件全局一致** |
+| 🏷️ 实体泛化 | 公司名、人名 → `客户A`、`人员B`，**跨文件全局一致** |
 | 🔗 别名替换 | 机构名、项目名 → `某某农商银行`、`某某重点项目`，可编辑 |
 | 📁 文件名处理 | 文件名与文件内容**同时**脱敏，文件名掩码自动适配 Windows 非法字符 |
 | 📊 Office 支持 | xlsx（多 sheet）、docx（段落+表格），**零 pip 依赖**，保真读写 |
@@ -30,31 +30,66 @@
 
 ## 快速开始
 
-### 方式 A：直接运行 EXE（推荐）
+### 方式 A：直接运行 EXE（推荐，零依赖）
 
 下载 `文件脱敏工具.exe`，双击即可。控制台会打印访问地址并自动打开浏览器。
 
 > 若 5000 端口被占用，会自动顺延到 5001、5002……
 > 服务只监听 `127.0.0.1`，局域网内其他机器无法访问。
 
-### 方式 B：从源码运行
+### 方式 B：源码运行（**内网断网环境用这个**）
+
+只要有 **Python 3.8+** 就能跑，**不需要 pip install 任何东西**：
 
 ```bash
-git clone <repo-url>
-cd 文件脱敏工具
+python server_stdlib.py
+```
+
+后端用 Python 标准库（`http.server`）实现，接口与 Flask 版完全一致。
+
+直接 `python app.py` 也行 —— 检测不到 Flask 时会自动回退到标准库服务器。
+
+### 方式 C：有 Flask 时
+
+```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-依赖只有 Flask。修改前端无需构建步骤，直接编辑 `templates/index.html` 刷新浏览器即可。
+Flask 版会额外自动打开浏览器。
 
-### 方式 C：自己打包
+### 方式 D：自己打包
 
 ```bash
 build.bat
 ```
 
 产物为 `dist/文件脱敏工具.exe`（约 16 MB 单文件）。
+
+> **内网若禁止运行 EXE**，用方式 B：把项目目录拷过去运行
+> `python server_stdlib.py`。只需要 11 个文件：
+> `app.py` `core.py` `masker.py` `entity.py` `office_io.py` `pipeline.py`
+> `server_stdlib.py` `sensitive_fields.json` `entity_aliases.json`
+> `templates/index.html`
+
+### 排查
+
+访问 `http://127.0.0.1:<端口>/api/health` 可查看后端类型、版本、Python 版本：
+
+```json
+{
+  "ok": true,
+  "version": "1.2.0",
+  "backend": "stdlib",
+  "python": "3.13.11",
+  "flask_available": false,
+  "field_count": 72,
+  "categories": 8
+}
+```
+
+页面顶部也显示同样的信息。若那里显示「⚠ 后端未就绪」，
+说明浏览器访问的地址与服务实际监听的地址不是同一个 —— 请用控制台打印的地址。
 
 ---
 
@@ -190,6 +225,7 @@ PYTHONIOENCODING=utf-8 python tests/test_service_e2e.py # 服务级：HTTP API �
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/` | 前端界面 |
+| `GET` | `/api/health` | 健康检查：后端类型、版本、Python 版本 |
 | `GET` | `/api/field-library` | 返回内置字段库与默认勾选项 |
 | `GET` | `/api/aliases` | 返回默认别名表 |
 | `POST` | `/api/scan` | 扫描预览，返回命中明细、样例、实体映射表 |
@@ -235,10 +271,12 @@ PYTHONIOENCODING=utf-8 python tests/test_service_e2e.py # 服务级：HTTP API �
 
 ```
 文件脱敏工具/
-├── app.py                      # Flask 服务 + API
+├── app.py                      # 服务入口（有 Flask 用 Flask，没有就自动回退）
+├── server_stdlib.py            # 纯标准库 HTTP 服务器（零 pip 依赖）
+├── core.py                     # 业务逻辑（扫描 / 落盘），两种后端共用
 ├── masker.py                   # 脱敏引擎（扫描与落盘共用同一执行路径）
 ├── pipeline.py                 # 集成流水线（表格语义 + 各格式调度）
-├── entity.py                   # 实体泛化引擎（公司名/���名/别名）
+├── entity.py                   # 实体泛化引擎（公司名、人名、别名）
 ├── entity_aliases.json         # 默认别名表
 ├── office_io.py                # xlsx / docx 读写（纯标准库）
 ├── sensitive_fields.json       # 内置国企敏感字段库（可编辑扩充）
@@ -248,11 +286,10 @@ PYTHONIOENCODING=utf-8 python tests/test_service_e2e.py # 服务级：HTTP API �
 ├── tests/                      # 各模块自检脚本
 ├── build.bat                   # 打包脚本（PyInstaller 单文件 EXE）
 ├── start.bat                   # 启动脚本（优先用已打包 EXE）
-├── requirements.txt
+├── requirements.txt            # Flask 为可选依赖
 ├── test_masker.py              # 引擎自检
 ├── test_e2e.py                 # 端到端测试
 └── test_offline.py             # 离线自检
-```
 
 ---
 

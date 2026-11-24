@@ -154,6 +154,7 @@
 <div class="container">
     <h1>文件脱敏工具</h1>
     <p class="subtitle">本地运行 · 支持文件名与内容批量替换<span class="offline">完全离线 · 不调用任何模型 API</span></p>
+    <p class="subtitle" id="backendInfo" style="margin-top:-14px;margin-bottom:20px;color:#aaa;font-size:12px;">正在检测后端…</p>
 
     <!-- Directory -->
     <div class="card">
@@ -377,13 +378,99 @@ function escapeAttr(s) {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
+// ---------- 统一请求封装 ----------
+// 后端返回 HTML（404 页面 / 500 错误页 / 代理拦截页）时，直接 res.json() 会抛
+// "unexpected token < in json at position 0"，用户完全看不出原因。
+// 这里统一检查响应类型与状态码，把真正的原因显示出来。
+class ApiError extends Error {
+    constructor(message, detail) {
+        super(message);
+        this.detail = detail || '';
+    }
+}
+
+async function apiGet(path) {
+    let res;
+    try {
+        res = await fetch(path, { headers: { 'Accept': 'application/json' } });
+    } catch (e) {
+        throw new ApiError('无法连接后端服务', '请求 ' + path + ' 失败：' + e.message);
+    }
+    return parseJson(res, path);
+}
+
+async function apiPost(path, payload) {
+    let res;
+    try {
+        res = await fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) {
+        throw new ApiError('无法连接后端服务', '请求 ' + path + ' 失败：' + e.message);
+    }
+    return parseJson(res, path);
+}
+
+async function parseJson(res, path) {
+    const text = await res.text();
+    const ctype = (res.headers.get('Content-Type') || '').toLowerCase();
+
+    if (!res.ok) {
+        let hint = '';
+        if (!ctype.includes('json')) {
+            hint = '后端返回的不是 JSON（可能是 404 页面或代理拦截页）';
+        }
+        const snippet = text.replace(/\s+/g, ' ').slice(0, 160);
+        throw new ApiError(
+            '接口 ' + path + ' 返回 HTTP ' + res.status,
+            (hint ? hint + '；' : '') + '响应片段：' + (snippet || '(空)')
+        );
+    }
+    if (!ctype.includes('json')) {
+        const snippet = text.replace(/\s+/g, ' ').slice(0, 160);
+        throw new ApiError(
+            '接口 ' + path + ' 返回的不是 JSON',
+            'Content-Type: ' + (ctype || '(未声明)') + '；响应片段：' + (snippet || '(空)')
+        );
+    }
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        throw new ApiError('接口 ' + path + ' 的 JSON 解析失败', e.message);
+    }
+}
+
+function showApiError(e, where) {
+    const msg = (e && e.message) ? e.message : String(e);
+    const detail = (e && e.detail) ? e.detail : '';
+    const full = where ? (where + '\n' + msg + (detail ? '\n' + detail : '')) : (msg + (detail ? '\n' + detail : ''));
+    console.error('[脱敏工具] ' + full);
+    alert(full);
+}
+
+// ---------- 启动自检 ----------
+async function healthCheck() {
+    try {
+        const h = await apiGet('/api/health');
+        window.__backendInfo = h;
+        return h;
+    } catch (e) {
+        console.error('[脱敏工具] 健康检查失败', e);
+        return null;
+    }
+}
+
 // ---------- Field library ----------
 async function loadFieldLibrary() {
     try {
-        const res = await fetch('/api/field-library');
-        libraryData = await res.json();
+        libraryData = await apiGet('/api/field-library');
     } catch (e) {
-        document.getElementById('fieldLibrary').innerHTML = '<div style="color:#f56c6c;font-size:13px;">字段库加载失败</div>';
+        showApiError(e, '加载内置字段库失败');
+        document.getElementById('fieldLibrary').innerHTML =
+            '<div style="color:#f56c6c;font-size:13px;">字段库加载失败：' +
+            escapeHtml(e.message) + '</div>';
         return;
     }
     renderFieldLibrary();
@@ -512,8 +599,7 @@ function currentAliases() {
 }
 
 function loadAliases() {
-    fetch('/api/aliases')
-        .then(function(r) { return r.json(); })
+    apiGet('/api/aliases')
         .then(function(data) {
             const lines = [];
             const orgs = data.organizations || {};
@@ -522,6 +608,10 @@ function loadAliases() {
             Object.keys(projs).forEach(function(k) { lines.push(k + ' = ' + projs[k]); });
             document.getElementById('aliasTable').value = lines.join('\n');
             document.getElementById('aliasInfo').textContent = `已载入 ${lines.length} 条默认别名`;
+        })
+        .catch(function(e) {
+            showApiError(e, '加载默认别名失败（不影响其它功能，可手动填写）');
+            document.getElementById('aliasInfo').textContent = '默认别名加载失败，可手动填写';
         });
 }
 
@@ -553,17 +643,12 @@ async function scanFiles() {
     }
 
     try {
-        const res = await fetch('/api/scan', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await res.json();
+        const data = await apiPost('/api/scan', payload);
         if (data.error) { alert('错误: ' + data.error); return; }
         scanResult = data;
         showResult(data);
     } catch (e) {
-        alert('请求失败: ' + e.message);
+        showApiError(e, '扫描失败');
     }
 }
 
@@ -648,30 +733,25 @@ async function applyChanges() {
     if (!confirm(msg)) return;
 
     try {
-        const res = await fetch('/api/apply', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                directory: document.getElementById('directory').value.trim(),
-                mode: document.querySelector('.radio-item.active').dataset.mode,
-                rules: currentRules(),
-                word_list: currentWordList(),
-                field_ids: selectedFieldIds(),
-                mask: document.getElementById('maskStyle').value || '***',
-                filename_mask: document.getElementById('filenameMask').value || '已脱敏',
-                case_sensitive: document.getElementById('caseSensitive').checked,
-                include_filenames: document.getElementById('includeFilenames').checked,
-                include_contents: document.getElementById('includeContents').checked,
-                recursive: document.getElementById('recursive').checked,
-                generalize_entities: document.getElementById('generalizeEntities').checked,
-                aliases: currentAliases(),
-                preview_data: scanResult,
-            }),
+        const data = await apiPost('/api/apply', {
+            directory: document.getElementById('directory').value.trim(),
+            mode: document.querySelector('.radio-item.active').dataset.mode,
+            rules: currentRules(),
+            word_list: currentWordList(),
+            field_ids: selectedFieldIds(),
+            mask: document.getElementById('maskStyle').value || '***',
+            filename_mask: document.getElementById('filenameMask').value || '已脱敏',
+            case_sensitive: document.getElementById('caseSensitive').checked,
+            include_filenames: document.getElementById('includeFilenames').checked,
+            include_contents: document.getElementById('includeContents').checked,
+            recursive: document.getElementById('recursive').checked,
+            generalize_entities: document.getElementById('generalizeEntities').checked,
+            aliases: currentAliases(),
+            preview_data: scanResult,
         });
-        const data = await res.json();
         showSuccess(data);
     } catch (e) {
-        alert('执行失败: ' + e.message);
+        showApiError(e, '执行失败');
     }
 }
 
@@ -694,6 +774,16 @@ function resetResult() {
 // ---------- Init ----------
 addRule();
 setMode('combo');
+healthCheck().then(function(h) {
+    const el = document.getElementById('backendInfo');
+    if (!h) {
+        el.innerHTML = '<span style="color:#f56c6c;">⚠ 后端未就绪 —— 请确认服务已启动，且浏览器访问的是服务打印出的地址</span>';
+        return;
+    }
+    const backendName = h.backend === 'flask' ? 'Flask' : 'Python 标准库（零依赖）';
+    el.innerHTML = `后端 ${escapeHtml(backendName)} · 版本 ${escapeHtml(h.version)} · ` +
+                   `Python ${escapeHtml(h.python)} · 字段库 ${h.field_count} 项`;
+});
 loadFieldLibrary();
 loadAliases();
 </script>

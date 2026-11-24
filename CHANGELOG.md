@@ -2,6 +2,27 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.1] - 2026-11-24
+
+### 修复
+
+- **内网断网环境启动失败 / 接口报 `unexpected token < in json at position 0`**
+  - 抽出 `core.py`：业务逻辑与 Web 框架解耦，两种后端共用同一份实现
+  - 新增 `server_stdlib.py`：**纯标准库** HTTP 服务器（`http.server`），
+    内网只要有 Python 3.8+ 就能跑，**不需要 pip install flask**
+  - `app.py` 检测不到 Flask 时自动回退到标准库服务器
+  - 前端所有请求改用统一封装：先检查 `res.ok` 与 `Content-Type`，
+    后端返回 HTML（404 页面 / 500 错误页 / 代理拦截页）时给出
+    **可诊断的错误信息**（接口路径、HTTP 状态码、响应片段），
+    不再抛出让用户无从判断的 JSON 解析异常
+  - 新增 `GET /api/health`：返回后端类型、版本、Python 版本、字段库规模
+  - 页面顶部显示后端信息，后端未就绪时明确提示
+
+### 新增
+
+- `tests/test_backends.py`：Flask 版与标准库版的接口、响应内容、扫描结果一致性对比
+- `tests/test_frontend_robust.py`：前端请求封装对 HTML / 非法 JSON / 连接失败的错误处理验证
+
 ## [1.2.0] - 2026-11-23
 
 ### 新增

@@ -35,10 +35,13 @@ if exist dist rmdir /s /q dist
 if exist "文件脱敏工具.spec" del /q "文件脱敏工具.spec"
 
 echo [3/3] 打包中, 首次运行需解压, 约需 1-2 分钟 ...
+REM 打包出来的 EXE 内置 Flask，不依赖目标机环境。
+REM 若目标机禁止运行 EXE，可改用源码部署：python server_stdlib.py（零依赖）。
 python -m PyInstaller --noconfirm --clean --onefile --noupx ^
     --name "文件脱敏工具" ^
     --add-data "templates;templates" ^
     --add-data "sensitive_fields.json;." ^
+    --add-data "entity_aliases.json;." ^
     --hidden-import=flask ^
     --hidden-import=jinja2 ^
     app.py
@@ -54,8 +57,8 @@ echo.
 echo ============================================================
 echo   打包完成: dist\文件脱敏工具.exe
 echo.
-echo   部署方式: 把 dist\文件脱敏工具.exe 单独拷贝到目标机器,
-echo             双击即可运行。完全断网可用, 不需要 Python,
-echo             不联网, 不调用任何大模型 API。
+echo   部署方式一（推荐）: 把 dist\文件脱敏工具.exe 拷到目标机，双击运行。
+echo   部署方式二（EXE 被禁用的环境）: 拷贝整个项目目录到目标机，
+echo       运行 python server_stdlib.py —— 纯标准库，零 pip 依赖。
 echo ============================================================
 pause

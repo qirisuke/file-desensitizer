@@ -1,1 +1,8 @@
+# Flask 是可选依赖。
+#
+#   有 Flask   -> python app.py            （自动打开浏览器）
+#   无 Flask   -> python server_stdlib.py   （纯标准库，零依赖）
+#
+# app.py 检测不到 Flask 时会自动回退到标准库服务器，
+# 因此在断网、装不了 pip 包的内网环境，直接用 server_stdlib.py 即可。
 flask>=3.0.0
